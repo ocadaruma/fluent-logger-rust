@@ -1,0 +1,7 @@
+[package]
+
+name = "fluent"
+version = "0.1.0"
+authors = ["ocadaruma <ocadaruma@gmail.com>"]
+
+[dependencies]
