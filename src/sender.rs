@@ -188,3 +188,87 @@ impl<A: ToSocketAddrs + Copy, R: RetryManager, H: ErrorHandler> Sender for TcpSe
         }
     }
 }
+
+use std::os::unix::net::UnixStream;
+use std::convert::AsRef;
+use std::path::Path;
+/// A Sender implementation via Unix socket.
+pub struct UnixSocketSender<A: AsRef<Path> + Copy, R: RetryManager, H: ErrorHandler> {
+    addr: A,
+    stream: UnixStream,
+    retry_manager: R,
+    error_handler: H,
+    buffer: Vec<u8>,
+}
+
+impl<A: AsRef<Path> + Copy, R: RetryManager, H: ErrorHandler> UnixSocketSender<A, R, H> {
+    pub fn new(addr: A, retry_manager: R, error_handler: H) -> Result<UnixSocketSender<A, R, H>, IOError> {
+        UnixStream::connect(addr).map(|stream| {
+            UnixSocketSender {
+                addr: addr,
+                stream: stream,
+                retry_manager: retry_manager,
+                buffer: Vec::with_capacity(8 * 1024 * 1024), // 8MB
+                error_handler: error_handler,
+            }
+        })
+    }
+
+    fn send_buffer_with_reconnect_once(&mut self) -> Result<(), IOError> {
+        match self.stream.write(self.buffer.as_slice()) {
+            Err(_) => {
+                UnixStream::connect(self.addr).and_then(|new_stream| {
+                    self.stream = new_stream;
+                    self.stream.write(self.buffer.as_slice()).map(|_| ())
+                })
+            },
+            Ok(_) => Ok(()),
+        }
+    }
+
+    fn flush_buffer(&mut self) -> Result<(), SenderError> {
+        if self.buffer.is_empty() {
+            self.retry_manager.clear_errors();
+            Ok(())
+        } else {
+            match self.send_buffer_with_reconnect_once() {
+                Err(e) => {
+                    let now = Instant::now();
+                    let err = SenderError::IO(e);
+                    self.retry_manager.record_error(now);
+                    self.error_handler.handle_error(now, &err, self.buffer.as_slice());
+                    Err(err)
+                },
+                Ok(_) => {
+                    self.buffer.clear();
+                    self.retry_manager.clear_errors();
+                    Ok(())
+                },
+            }
+        }
+    }
+}
+
+impl<A: AsRef<Path> + Copy, R: RetryManager, H: ErrorHandler> Sender for UnixSocketSender<A, R, H> {
+    fn emit(&mut self, data: &[u8]) -> Result<(), SenderError> {
+
+        let now = Instant::now();
+
+        // if buffer space is insufficient, flush first
+        if self.buffer.len() + data.len() > self.buffer.capacity() && self.retry_manager.should_retry(now) {
+            self.flush_buffer() ?
+        }
+        // if data is larger than buffer capacity, just return error.
+        if data.len() > self.buffer.capacity() - self.buffer.len() {
+            Err(SenderError::TooLargeData) ?
+        }
+
+        // write to buffer then flush
+        self.buffer.extend_from_slice(data);
+        if self.retry_manager.should_retry(now) {
+            self.flush_buffer()
+        } else {
+            Ok(())
+        }
+    }
+}
