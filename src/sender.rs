@@ -3,14 +3,21 @@ use std::io::{Error as IOError, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
+#[derive(Debug, PartialEq)]
+pub enum RetryLevel {
+    Ready,
+    Wait,
+    AttemptsExceeded,
+}
+
 /// Provides retry manager based on error timestamp.
 pub trait RetryManager {
 
-    fn clear_errors(&mut self);
+    fn reset(&mut self);
 
     fn record_error(&mut self, now: Instant);
 
-    fn should_retry(&self, now: Instant) -> bool;
+    fn attempt(&self, now: Instant) -> RetryLevel;
 }
 
 /// Provides constant-delay retry manager.
@@ -18,22 +25,22 @@ pub trait RetryManager {
 /// # Examples
 ///
 /// ```
-/// use fluent::sender::{ConstantDelay, RetryManager};
+/// use fluent::sender::{ConstantDelay, RetryLevel, RetryManager};
 /// use std::time::{Duration, Instant};
 ///
 /// let mut manager = ConstantDelay::new();
 /// let now = Instant::now();
 ///
 /// // when no error
-/// assert!(manager.should_retry(now));
+/// assert_eq!(manager.attempt(now), RetryLevel::Ready);
 ///
 /// // elapsed enough since last error
 /// let last = now - Duration::from_millis(100);
 /// manager.record_error(last);
-/// assert!(manager.should_retry(now));
+/// assert_eq!(manager.attempt(now), RetryLevel::Ready);
 ///
 /// // should wait
-/// assert!(!manager.should_retry(last + Duration::from_millis(10)));
+/// assert_eq!(manager.attempt(last + Duration::from_millis(10)), RetryLevel::Wait);
 /// ```
 pub struct ConstantDelay {
     error_records: VecDeque<Instant>,
@@ -44,7 +51,7 @@ pub struct ConstantDelay {
 impl ConstantDelay {
     pub fn new() -> ConstantDelay {
         ConstantDelay {
-            error_records: VecDeque::new(),
+            error_records: VecDeque::with_capacity(100),
             max_errors: 100,
             wait: Duration::from_millis(50),
         }
@@ -53,7 +60,7 @@ impl ConstantDelay {
 
 impl RetryManager for ConstantDelay {
 
-    fn clear_errors(&mut self) {
+    fn reset(&mut self) {
         self.error_records.clear();
     }
 
@@ -65,10 +72,15 @@ impl RetryManager for ConstantDelay {
         }
     }
 
-    fn should_retry(&self, now: Instant) -> bool {
-        match self.error_records.back() {
-            Some(last) => (now - *last) >= self.wait,
-            None => true,
+    fn attempt(&self, now: Instant) -> RetryLevel {
+        if self.error_records.len() > self.max_errors {
+            RetryLevel::AttemptsExceeded
+        } else {
+            match self.error_records.back() {
+                Some(last) if (now - *last) >= self.wait => RetryLevel::Ready,
+                Some(_) => RetryLevel::Wait,
+                None => RetryLevel::Ready,
+            }
         }
     }
 }
@@ -76,7 +88,7 @@ impl RetryManager for ConstantDelay {
 /// Provides feature to handle error (for example, log to local file / raise alert, etc)
 pub trait ErrorHandler {
 
-    fn handle_error(&mut self, timestamp: Instant, error: &SenderError, unsent_data: &[u8]);
+    fn handle_error(&mut self, timestamp: Instant, error: &SenderError, current_buffer: &[u8]);
 }
 
 /// Do nothing when error occurred.
@@ -91,11 +103,14 @@ impl ErrorHandler for NullHandler {
 pub trait Sender {
 
     fn emit(&mut self, data: &[u8]) -> Result<(), SenderError>;
+
+    fn flush(&mut self) -> Result<(), SenderError>;
 }
 
 pub enum SenderError {
     IO(IOError),
     TooLargeData,
+    RetryAttemptsExceeded,
 }
 
 /// A Sender implementation via TCP.
@@ -107,7 +122,7 @@ pub enum SenderError {
 ///
 /// let mut sender = TcpSender::new("127.0.0.1:24224", ConstantDelay::new(), NullHandler).unwrap();
 ///
-/// sender.emit("[\"foo.bar\",1500564758,{\"key\":\"value\"}]".as_bytes());
+/// let _ = sender.emit("[\"foo.bar\",1500564758,{\"key\":\"value\"}]".as_bytes());
 /// ```
 pub struct TcpSender<A: ToSocketAddrs + Copy, R: RetryManager, H: ErrorHandler> {
     addr: A,
@@ -118,6 +133,7 @@ pub struct TcpSender<A: ToSocketAddrs + Copy, R: RetryManager, H: ErrorHandler> 
 }
 
 impl<A: ToSocketAddrs + Copy, R: RetryManager, H: ErrorHandler> TcpSender<A, R, H> {
+
     pub fn new(addr: A, retry_manager: R, error_handler: H) -> Result<TcpSender<A, R, H>, IOError> {
         TcpStream::connect(addr).map(|stream| {
             TcpSender {
@@ -144,7 +160,7 @@ impl<A: ToSocketAddrs + Copy, R: RetryManager, H: ErrorHandler> TcpSender<A, R, 
 
     fn flush_buffer(&mut self) -> Result<(), SenderError> {
         if self.buffer.is_empty() {
-            self.retry_manager.clear_errors();
+            self.retry_manager.reset();
             Ok(())
         } else {
             match self.send_buffer_with_reconnect_once() {
@@ -157,7 +173,7 @@ impl<A: ToSocketAddrs + Copy, R: RetryManager, H: ErrorHandler> TcpSender<A, R, 
                 },
                 Ok(_) => {
                     self.buffer.clear();
-                    self.retry_manager.clear_errors();
+                    self.retry_manager.reset();
                     Ok(())
                 },
             }
@@ -166,109 +182,38 @@ impl<A: ToSocketAddrs + Copy, R: RetryManager, H: ErrorHandler> TcpSender<A, R, 
 }
 
 impl<A: ToSocketAddrs + Copy, R: RetryManager, H: ErrorHandler> Sender for TcpSender<A, R, H> {
+
     fn emit(&mut self, data: &[u8]) -> Result<(), SenderError> {
 
         let now = Instant::now();
 
+        if self.retry_manager.attempt(now) == RetryLevel::AttemptsExceeded {
+            let error = SenderError::RetryAttemptsExceeded;
+            self.error_handler.handle_error(now, &error, self.buffer.as_slice());
+            Err(error) ?
+        }
+
         // if buffer space is insufficient, flush first
-        if self.buffer.len() + data.len() > self.buffer.capacity() && self.retry_manager.should_retry(now) {
+        if self.buffer.len() + data.len() > self.buffer.capacity() && self.retry_manager.attempt(now) == RetryLevel::Ready {
             self.flush_buffer() ?
         }
         // if data is larger than buffer capacity, just return error.
         if data.len() > self.buffer.capacity() - self.buffer.len() {
-            Err(SenderError::TooLargeData) ?
+            let error = SenderError::TooLargeData;
+            self.error_handler.handle_error(now, &error, self.buffer.as_slice());
+            Err(error) ?
         }
 
         // write to buffer then flush
         self.buffer.extend_from_slice(data);
-        if self.retry_manager.should_retry(now) {
+        if self.retry_manager.attempt(now) == RetryLevel::Ready {
             self.flush_buffer()
         } else {
             Ok(())
         }
     }
-}
 
-use std::os::unix::net::UnixStream;
-use std::convert::AsRef;
-use std::path::Path;
-/// A Sender implementation via Unix socket.
-pub struct UnixSocketSender<A: AsRef<Path> + Copy, R: RetryManager, H: ErrorHandler> {
-    addr: A,
-    stream: UnixStream,
-    retry_manager: R,
-    error_handler: H,
-    buffer: Vec<u8>,
-}
-
-impl<A: AsRef<Path> + Copy, R: RetryManager, H: ErrorHandler> UnixSocketSender<A, R, H> {
-    pub fn new(addr: A, retry_manager: R, error_handler: H) -> Result<UnixSocketSender<A, R, H>, IOError> {
-        UnixStream::connect(addr).map(|stream| {
-            UnixSocketSender {
-                addr: addr,
-                stream: stream,
-                retry_manager: retry_manager,
-                buffer: Vec::with_capacity(8 * 1024 * 1024), // 8MB
-                error_handler: error_handler,
-            }
-        })
-    }
-
-    fn send_buffer_with_reconnect_once(&mut self) -> Result<(), IOError> {
-        match self.stream.write(self.buffer.as_slice()) {
-            Err(_) => {
-                UnixStream::connect(self.addr).and_then(|new_stream| {
-                    self.stream = new_stream;
-                    self.stream.write(self.buffer.as_slice()).map(|_| ())
-                })
-            },
-            Ok(_) => Ok(()),
-        }
-    }
-
-    fn flush_buffer(&mut self) -> Result<(), SenderError> {
-        if self.buffer.is_empty() {
-            self.retry_manager.clear_errors();
-            Ok(())
-        } else {
-            match self.send_buffer_with_reconnect_once() {
-                Err(e) => {
-                    let now = Instant::now();
-                    let err = SenderError::IO(e);
-                    self.retry_manager.record_error(now);
-                    self.error_handler.handle_error(now, &err, self.buffer.as_slice());
-                    Err(err)
-                },
-                Ok(_) => {
-                    self.buffer.clear();
-                    self.retry_manager.clear_errors();
-                    Ok(())
-                },
-            }
-        }
-    }
-}
-
-impl<A: AsRef<Path> + Copy, R: RetryManager, H: ErrorHandler> Sender for UnixSocketSender<A, R, H> {
-    fn emit(&mut self, data: &[u8]) -> Result<(), SenderError> {
-
-        let now = Instant::now();
-
-        // if buffer space is insufficient, flush first
-        if self.buffer.len() + data.len() > self.buffer.capacity() && self.retry_manager.should_retry(now) {
-            self.flush_buffer() ?
-        }
-        // if data is larger than buffer capacity, just return error.
-        if data.len() > self.buffer.capacity() - self.buffer.len() {
-            Err(SenderError::TooLargeData) ?
-        }
-
-        // write to buffer then flush
-        self.buffer.extend_from_slice(data);
-        if self.retry_manager.should_retry(now) {
-            self.flush_buffer()
-        } else {
-            Ok(())
-        }
+    fn flush(&mut self) -> Result<(), SenderError> {
+        self.flush_buffer()
     }
 }

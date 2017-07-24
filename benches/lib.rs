@@ -3,7 +3,6 @@
 extern crate fluent;
 extern crate test;
 
-use fluent::byteutil;
 use fluent::codec;
 use test::test::Bencher;
 
@@ -71,20 +70,20 @@ fn bench_json_logger(bench: &mut Bencher) {
         phone_number: "000-0000",
     };
 
-    use fluent::logger::{DefaultTcpSender, DefaultUnixSocketSender};
 //    let mut raw = fluent::logger::RawFluentLogger::<DefaultTcpSender<&str>>::default_tcp_logger("127.0.0.1:24224").unwrap();
-    let mut raw = fluent::logger::RawFluentLogger::<DefaultUnixSocketSender<&str>>::default_uds_logger("/Users/hokada/develop/opt-tech/v7-apps/docker/fluentd/socket/socket.sock").unwrap();
 //    let mut log = fluent::logger::JSONLogger::new(raw);
-    let mut log = fluent::logger::MessagePackLogger::new(raw);
-    log.log("foo.bar1", &j1);
+
+    let mut log = fluent::logger::factory::json("127.0.0.1:24224").unwrap();
+    //    log.log("foo.bar1", &j1);
 
     bench.iter(|| {
 //        let mut raw = fluent::logger::RawFluentLogger::<DefaultTcpSender<&str>>::default_tcp_logger("127.0.0.1:24224").unwrap();
 //        let mut log = fluent::logger::JSONLogger::new(raw);
 
-//        log.log("foo.bar1", &j1);
-//        log.log("foo.bar2", &j2);
-//        log.log("foo.bar3", &j3);
+//        let mut log = fluent::logger::factory::json("127.0.0.1:24224").unwrap();
+        let _ = log.log("foo.bar1", &j1);
+        let _ = log.log("foo.bar2", &j2);
+        let _ = log.log("foo.bar3", &j3);
     });
 }
 

@@ -1,7 +1,9 @@
+//! # Fluent logger for Rust
+
 pub mod codec;
 
 pub mod logger;
 
 pub mod sender;
 
-pub mod byteutil;
+extern crate chrono;
