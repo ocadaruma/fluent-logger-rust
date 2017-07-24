@@ -1,6 +1,14 @@
 use chrono::prelude::{DateTime, Utc};
-use codec::{ToJSON, ToMessagePack};
+use rmp_serde;
 use sender::*;
+use serde_json;
+use serde::Serialize;
+
+pub enum FluentError {
+    Sender(SenderError),
+    JSONSerialize(serde_json::Error),
+    MessagePackSerialize(rmp_serde::encode::Error),
+}
 
 pub type UtcDateTime = DateTime<Utc>;
 
@@ -10,22 +18,22 @@ pub struct FluentLogger<S: Sender> {
 
 impl<S: Sender> FluentLogger<S> {
 
-    pub fn log_json<T: ToJSON>(&mut self, tag: &str, data: &T) -> Result<(), SenderError> {
+    pub fn log_json<T: Serialize>(&mut self, tag: &str, data: &T) -> Result<(), FluentError> {
         self.log_json_with_timestamp(tag, Utc::now(), data)
     }
 
-    pub fn log_json_with_timestamp<T: ToJSON>(&mut self, tag: &str, timestamp: UtcDateTime, data: &T) -> Result<(), SenderError> {
-        let json = data.encode();
+    pub fn log_json_with_timestamp<T: Serialize>(&mut self, tag: &str, timestamp: UtcDateTime, data: &T) -> Result<(), FluentError> {
+        let json = serde_json::to_string(data).map_err(|err| FluentError::JSONSerialize(err)) ?;
         let message = format!(r#"["{}",{},{}]"#, tag, timestamp.timestamp(), json);
 
-        self.sender.emit(message.as_bytes())
+        self.sender.emit(message.as_bytes()).map_err(|err| FluentError::Sender(err))
     }
 
-    pub fn log_msgpack<T: ToMessagePack>(&mut self, tag: &str, data: &T) -> Result<(), SenderError> {
+    pub fn log_msgpack<T: Serialize>(&mut self, tag: &str, data: &T) -> Result<(), FluentError> {
         self.log_msgpack_with_timestamp(tag, Utc::now(), data)
     }
 
-    pub fn log_msgpack_with_timestamp<T: ToMessagePack>(&mut self, tag: &str, timestamp: UtcDateTime, data: &T) -> Result<(), SenderError> {
+    pub fn log_msgpack_with_timestamp<T: Serialize>(&mut self, tag: &str, timestamp: UtcDateTime, data: &T) -> Result<(), FluentError> {
         let mut buf: Vec<u8> = Vec::new();
 
         // start array
@@ -37,10 +45,10 @@ impl<S: Sender> FluentLogger<S> {
         msgpack_util::write_i64(timestamp.timestamp(), &mut buf);
 
         // write data
-        let mut pack = data.encode();
+        let mut pack = rmp_serde::to_vec(data).map_err(|err| FluentError::MessagePackSerialize(err)) ?;
         buf.append(&mut pack);
 
-        self.sender.emit(buf.as_slice())
+        self.sender.emit(buf.as_slice()).map_err(|err| FluentError::Sender(err))
     }
 }
 
@@ -55,11 +63,11 @@ impl<S: Sender> JSONLogger<S> {
         JSONLogger { logger: underlying }
     }
 
-    pub fn log<T: ToJSON>(&mut self, tag: &str, data: &T) -> Result<(), SenderError> {
+    pub fn log<T: Serialize>(&mut self, tag: &str, data: &T) -> Result<(), FluentError> {
         self.logger.log_json(tag, data)
     }
 
-    pub fn log_with_timestamp<T: ToJSON>(&mut self, tag: &str, timestamp: UtcDateTime, data: &T) -> Result<(), SenderError> {
+    pub fn log_with_timestamp<T: Serialize>(&mut self, tag: &str, timestamp: UtcDateTime, data: &T) -> Result<(), FluentError> {
         self.logger.log_json_with_timestamp(tag, timestamp, data)
     }
 }
@@ -75,11 +83,11 @@ impl<S: Sender> MessagePackLogger<S> {
         MessagePackLogger { logger: underlying }
     }
 
-    pub fn log<T: ToMessagePack>(&mut self, tag: &str, data: &T) -> Result<(), SenderError> {
+    pub fn log<T: Serialize>(&mut self, tag: &str, data: &T) -> Result<(), FluentError> {
         self.logger.log_msgpack(tag, data)
     }
 
-    pub fn log_with_timestamp<T: ToMessagePack>(&mut self, tag: &str, timestamp: UtcDateTime, data: &T) -> Result<(), SenderError> {
+    pub fn log_with_timestamp<T: Serialize>(&mut self, tag: &str, timestamp: UtcDateTime, data: &T) -> Result<(), FluentError> {
         self.logger.log_msgpack_with_timestamp(tag, timestamp, data)
     }
 }

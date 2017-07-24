@@ -3,7 +3,6 @@
 extern crate fluent;
 extern crate test;
 
-use fluent::codec;
 use test::test::Bencher;
 
 //#[bench]
@@ -36,22 +35,6 @@ struct Person<'a> {
     phone_number: &'a str,
 }
 
-//impl<'a> Copy for Person<'a> { }
-
-impl<'a> codec::ToJSON for Person<'a> {
-    fn encode(&self) -> std::string::String {
-        serde_json::to_string(self).unwrap()
-    }
-}
-
-use rmp_serde::{Serializer, to_vec};
-
-impl<'a> codec::ToMessagePack for Person<'a> {
-    fn encode(&self) -> Vec<u8> {
-        to_vec(self).unwrap()
-    }
-}
-
 #[bench]
 fn bench_json_logger(bench: &mut Bencher) {
     let j1 = Person {
@@ -73,17 +56,17 @@ fn bench_json_logger(bench: &mut Bencher) {
 //    let mut raw = fluent::logger::RawFluentLogger::<DefaultTcpSender<&str>>::default_tcp_logger("127.0.0.1:24224").unwrap();
 //    let mut log = fluent::logger::JSONLogger::new(raw);
 
-    let mut log = fluent::logger::factory::json("127.0.0.1:24224").unwrap();
+    let mut log = fluent::logger::factory::msgpack("127.0.0.1:24224").unwrap();
     //    log.log("foo.bar1", &j1);
 
     bench.iter(|| {
 //        let mut raw = fluent::logger::RawFluentLogger::<DefaultTcpSender<&str>>::default_tcp_logger("127.0.0.1:24224").unwrap();
 //        let mut log = fluent::logger::JSONLogger::new(raw);
 
-//        let mut log = fluent::logger::factory::json("127.0.0.1:24224").unwrap();
+        let mut log = fluent::logger::factory::msgpack("127.0.0.1:24224").unwrap();
         let _ = log.log("foo.bar1", &j1);
-        let _ = log.log("foo.bar2", &j2);
-        let _ = log.log("foo.bar3", &j3);
+//        let _ = log.log("foo.bar2", &j2);
+//        let _ = log.log("foo.bar3", &j3);
     });
 }
 
