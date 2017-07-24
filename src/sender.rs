@@ -49,7 +49,7 @@ pub struct ConstantDelay {
 }
 
 impl ConstantDelay {
-    pub fn new() -> ConstantDelay {
+    pub fn default() -> ConstantDelay {
         ConstantDelay {
             error_records: VecDeque::with_capacity(100),
             max_errors: 100,

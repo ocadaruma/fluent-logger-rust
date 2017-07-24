@@ -23,10 +23,10 @@ impl<S: Sender> FluentLogger<S> {
     }
 
     pub fn log_json_with_timestamp<T: Serialize>(&mut self, tag: &str, timestamp: UtcDateTime, data: &T) -> Result<(), FluentError> {
-        let json = serde_json::to_string(data).map_err(|err| FluentError::JSONSerialize(err)) ?;
+        let json = serde_json::to_string(data).map_err(FluentError::JSONSerialize) ?;
         let message = format!(r#"["{}",{},{}]"#, tag, timestamp.timestamp(), json);
 
-        self.sender.emit(message.as_bytes()).map_err(|err| FluentError::Sender(err))
+        self.sender.emit(message.as_bytes()).map_err(FluentError::Sender)
     }
 
     pub fn log_msgpack<T: Serialize>(&mut self, tag: &str, data: &T) -> Result<(), FluentError> {
@@ -45,10 +45,10 @@ impl<S: Sender> FluentLogger<S> {
         msgpack_util::write_i64(timestamp.timestamp(), &mut buf);
 
         // write data
-        let mut pack = rmp_serde::to_vec(data).map_err(|err| FluentError::MessagePackSerialize(err)) ?;
+        let mut pack = rmp_serde::to_vec(data).map_err(FluentError::MessagePackSerialize) ?;
         buf.append(&mut pack);
 
-        self.sender.emit(buf.as_slice()).map_err(|err| FluentError::Sender(err))
+        self.sender.emit(buf.as_slice()).map_err(FluentError::Sender)
     }
 }
 
@@ -72,7 +72,7 @@ impl<S: Sender> JSONLogger<S> {
     }
 }
 
-/// Send messages to fluentd via MessagePack encoding.
+/// Send messages to fluentd via `MessagePack` encoding.
 pub struct MessagePackLogger<S: Sender> {
     logger: FluentLogger<S>,
 }
@@ -108,32 +108,32 @@ pub mod factory {
     use std::io::{Error as IOError};
 
     pub fn json(addr: &str) -> Result<JSONLogger<TcpSender<&str, ConstantDelay, NullHandler>>, IOError> {
-        TcpSender::new(addr, ConstantDelay::new(), NullHandler).map(|sender| {
+        TcpSender::new(addr, ConstantDelay::default(), NullHandler).map(|sender| {
             JSONLogger::new(FluentLogger { sender: sender })
         })
     }
 
     pub fn json_with_error_handler<H: ErrorHandler>(addr: &str, handler: H) -> Result<JSONLogger<TcpSender<&str, ConstantDelay, H>>, IOError> {
-        TcpSender::new(addr, ConstantDelay::new(), handler).map(|sender| {
+        TcpSender::new(addr, ConstantDelay::default(), handler).map(|sender| {
             JSONLogger::new(FluentLogger { sender: sender })
         })
     }
 
     pub fn msgpack(addr: &str) -> Result<MessagePackLogger<TcpSender<&str, ConstantDelay, NullHandler>>, IOError> {
-        TcpSender::new(addr, ConstantDelay::new(), NullHandler).map(|sender| {
+        TcpSender::new(addr, ConstantDelay::default(), NullHandler).map(|sender| {
             MessagePackLogger::new(FluentLogger { sender: sender })
         })
     }
 
     pub fn msgpack_with_error_handler<H: ErrorHandler>(addr: &str, handler: H) -> Result<MessagePackLogger<TcpSender<&str, ConstantDelay, H>>, IOError> {
-        TcpSender::new(addr, ConstantDelay::new(), handler).map(|sender| {
+        TcpSender::new(addr, ConstantDelay::default(), handler).map(|sender| {
             MessagePackLogger::new(FluentLogger { sender: sender })
         })
     }
 }
 
 mod msgpack_util {
-    //! A private module that provides functions to encode data to MessagePack.
+    //! A private module that provides functions to encode data to `MessagePack`.
 
     pub fn write_i64(i: i64, out: &mut Vec<u8>) {
         out.push(0xd3);
